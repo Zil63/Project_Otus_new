@@ -1,0 +1,34 @@
+version: "3.3"
+
+services:
+  database:
+    image: mysql:{{ mysql_version }}
+    container_name: database
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ db_root_password }}"
+      MYSQL_DATABASE: "{{ db_name }}"
+      MYSQL_USER: "{{ db_user }}"
+      MYSQL_PASSWORD: "{{ db_password }}"
+    ports:
+      - "3306:3306"
+    networks:
+      - app-network
+    volumes:
+      - database_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      --server-id=1
+      --log-bin=mysql-bin
+      --binlog-format=ROW
+      --gtid-mode=ON
+      --enforce-gtid-consistency=ON
+      --master-info-repository=TABLE
+      --relay-log-info-repository=TABLE
+      --transaction-write-set-extraction=XXHASH64
+      --loose-group_replication_group_name="{{ mysql_repl_group_name }}"
+      --loose-group_replication_start_on_boot=off
+      --loose-group_replication_local_address=database:{{ mysql_repl_port }}
+      --loose-group_replication_group_seeds=database:{{ mysql_repl_port }},node2:{{ mysql_repl_port }},node3:{{ mysql_repl_port }}
+      --loose-group_replication_bootstrap_group=off
+    health

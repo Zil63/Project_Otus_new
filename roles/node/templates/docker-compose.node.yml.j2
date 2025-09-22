@@ -1,0 +1,16 @@
+version: '3.3'
+
+services:
+  node:
+    image: {{ node_image }}
+    container_name: node
+    working_dir: {{ node_workdir }}
+    volumes:
+      - {{ node_volume }}:{{ node_workdir }}
+    command: {{ node_command }}
+    networks:
+      - {{ docker_network }}
+
+networks:
+  {{ docker_network }}:
+    external: true

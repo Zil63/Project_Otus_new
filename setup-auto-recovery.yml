@@ -1,0 +1,21 @@
+---
+- name: Setup Automatic Recovery System
+  hosts: all
+  become: true
+  tasks:
+    - name: Copy health check script
+      ansible.builtin.copy:
+        src: scripts/health-check.sh
+        dest: /home/vagrant/project/scripts/health-check.sh
+        mode: "0755"
+
+    - name: Copy cron setup script
+      ansible.builtin.copy:
+        src: scripts/setup-cron.sh
+        dest: /home/vagrant/project/scripts/setup-cron.sh
+        mode: "0755"
+
+    - name: Setup automatic monitoring
+      ansible.builtin.command:
+        cmd: /home/vagrant/project/scripts/setup-cron.sh
+      tags: setup_cron

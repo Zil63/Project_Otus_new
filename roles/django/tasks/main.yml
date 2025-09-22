@@ -1,0 +1,19 @@
+---
+- name: Копировать requirements.txt
+  ansible.builtin.copy:
+    src: requirements.txt
+    dest: "{{ playbook_dir }}/{{ django_requirements }}"
+    mode: '0644'
+
+- name: Создать docker-compose файл для Django
+  ansible.builtin.template:
+    src: docker-compose.django.yml.j2
+    dest: "{{ playbook_dir }}/docker-compose.django.yml"
+    mode: '0644'
+
+- name: Запустить Django контейнер
+  community.docker.docker_compose:
+    project_src: "{{ playbook_dir }}"
+    files:
+      - docker-compose.django.yml
+    state: present

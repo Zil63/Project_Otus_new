@@ -1,0 +1,5 @@
+db_name: mydatabase
+db_root_password: rootpass
+db_user: wpuser
+db_password: wppass
+mysql_version: "8.0"

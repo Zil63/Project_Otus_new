@@ -1,0 +1,23 @@
+---
+- name: Скопировать docker-compose.yml
+  copy:
+    src: files/docker-compose.yml
+    dest: /home/vagrant/project/docker-compose.yml
+    owner: vagrant
+    group: vagrant
+    mode: '0644'
+
+- name: Создать .env
+  copy:
+    dest: /home/vagrant/project/.env
+    content: |
+      GRAFANA_ADMIN_USER=admin
+      GRAFANA_ADMIN_PASSWORD=admin123
+    owner: vagrant
+    group: vagrant
+    mode: '0600'
+
+- name: Запустить профиль monitoring
+  shell: docker compose --profile monitoring up -d
+  args:
+    chdir: /home/vagrant/project

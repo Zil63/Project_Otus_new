@@ -1,0 +1,11 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9094']  # или localhost:9094

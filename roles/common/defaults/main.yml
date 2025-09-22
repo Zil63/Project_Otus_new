@@ -1,0 +1,21 @@
+---
+# Список базовых пакетов для установки
+common_packages:
+  - curl
+  - wget
+  - nano
+  - htop
+  - git
+  - unzip
+  - net-tools
+  - aptitude
+
+# Настройки времени
+common_timezone: "Europe/Moscow"
+common_ntp_servers:
+  - pool.ntp.org
+  - ntp.ubuntu.com
+
+# Настройки SSH
+common_ssh_permit_root_login: "no"
+common_ssh_password_auth: "no"

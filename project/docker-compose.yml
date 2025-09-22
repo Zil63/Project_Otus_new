@@ -1,0 +1,471 @@
+# единый compose для двух ВМ через профили: dynamicweb и monitoring
+
+x-logging-syslog: &logging_syslog
+  driver: syslog
+  options:
+    syslog-address: "udp://${RSYSLOG_SERVER:-192.168.56.20}:514"
+    tag: "{{.Name}}"
+
+services:
+  # ─────────────────────────────
+  # DYNAMICWEB (192.168.56.10)
+  # ─────────────────────────────
+
+  certgen:
+    image: alpine:3.20
+    profiles: ["dynamicweb"]
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        mkdir -p /etc/letsencrypt
+        if [ -s /etc/letsencrypt/privkey.pem ] && [ -s /etc/letsencrypt/fullchain.pem ]; then
+          echo "certs exist, skipping"; exit 0; fi
+        apk add --no-cache openssl >/dev/null
+        echo "generating self-signed cert for ${SSL_DOMAIN:-localhost}..."
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/letsencrypt/privkey.pem \
+          -out /etc/letsencrypt/fullchain.pem \
+          -subj "/CN=${SSL_DOMAIN:-localhost}"
+        chmod 600 /etc/letsencrypt/privkey.pem /etc/letsencrypt/fullchain.pem
+        echo "done."
+    env_file: [.env]
+    volumes:
+      - ./ssl:/etc/letsencrypt
+
+  # MySQL 8.0 MASTER — writable
+  database:
+    image: mysql:8.0
+    container_name: database
+    profiles: ["dynamicweb"]
+    restart: always
+    env_file: [.env]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_BIND_ADDRESS: "0.0.0.0"
+    command:
+      - "--server-id=1"
+      - "--binlog_format=ROW"
+      - "--gtid_mode=ON"
+      - "--enforce_gtid_consistency=ON"
+      - "--log_bin=mysql-bin"
+      - "--binlog_row_image=FULL"
+      - "--skip-host-cache"
+      - "--read-only=OFF"
+      - "--super-read-only=OFF"
+    ports:
+      - "3306:3306"  # Добавлено для внешнего доступа
+    volumes:
+      - mysql_master_data:/var/lib/mysql
+      - ./mysql/conf.d/master.cnf:/etc/mysql/conf.d/master.cnf:ro
+    networks:
+      internal_net:
+        aliases:
+          - database
+          - mysql-db
+          - mysql-host
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p$${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    logging: *logging_syslog
+
+  # MySQL 8.0 SLAVE 1 — без read-only на старте (включится позже)
+  slave1:
+    image: mysql:8.0
+    container_name: slave1
+    profiles: ["dynamicweb"]
+    restart: always
+    env_file: [.env]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_ROOT_HOST: "%"
+    command:
+      - "--server-id=2"
+      - "--relay_log=relay-bin"
+      - "--log_bin=mysql-bin"
+      - "--skip-host-cache"
+      - "--gtid_mode=ON"
+      - "--enforce_gtid_consistency=ON"
+    volumes:
+      - mysql_slave1_data:/var/lib/mysql
+      - ./mysql/conf.d/slave.cnf:/etc/mysql/conf.d/slave.cnf:ro
+      - ./mysql/init/00_remote_root.sh:/docker-entrypoint-initdb.d/00_remote_root.sh:ro
+    networks: [internal_net]
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p$${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    logging: *logging_syslog
+
+  # MySQL 8.0 SLAVE 2 — без read-only на старте (включится позже)
+  slave2:
+    image: mysql:8.0
+    container_name: slave2
+    profiles: ["dynamicweb"]
+    restart: always
+    env_file: [.env]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_ROOT_HOST: "%"
+    command:
+      - "--server-id=3"
+      - "--relay_log=relay-bin"
+      - "--log_bin=mysql-bin"
+      - "--skip-host-cache"
+      - "--gtid_mode=ON"
+      - "--enforce_gtid_consistency=ON"
+    volumes:
+      - mysql_slave2_data:/var/lib/mysql
+      - ./mysql/conf.d/slave.cnf:/etc/mysql/conf.d/slave.cnf:ro
+      - ./mysql/init/00_remote_root.sh:/docker-entrypoint-initdb.d/00_remote_root.sh:ro
+    networks: [internal_net]
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p$${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    logging: *logging_syslog
+
+  # One-shot: автоинициализация репликации (GTID AUTO_POSITION + native pwd)
+  mysql_init_repl:
+    image: mysql:8.0
+    container_name: mysql_init_repl
+    profiles: ["dynamicweb"]
+    restart: "no"
+    env_file: [.env]
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        : "$${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required}"
+        : "$${REPL_PASSWORD:=replicaPass123}"
+        export MYSQL_PWD="$${DB_ROOT_PASSWORD}"
+
+        echo "Waiting for master..."
+        until mysqladmin ping -h database -uroot --silent; do sleep 2; done
+
+        echo "Create/GRANT replication user on master (mysql_native_password)..."
+        mysql -uroot -h database -e "
+          CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '$${REPL_PASSWORD}';
+          ALTER  USER 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '$${REPL_PASSWORD}';
+          GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%';
+          FLUSH PRIVILEGES;"
+
+        for SL in slave1 slave2; do
+          echo "Waiting for $$SL..."
+          until mysqladmin ping -h "$$SL" -uroot --silent; do sleep 2; done
+
+          echo "Temporarily disabling read-only on $$SL..."
+          mysql -uroot -h "$$SL" -e "
+            SET GLOBAL super_read_only=OFF;
+            SET GLOBAL read_only=OFF;"
+
+          echo "Ensure remote root on $$SL..."
+          mysql -uroot -h "$$SL" -e "
+            CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '$${DB_ROOT_PASSWORD}';
+            ALTER  USER 'root'@'%' IDENTIFIED BY '$${DB_ROOT_PASSWORD}';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;"
+
+          echo "Configuring replica on $$SL (GTID AUTO_POSITION=1, GET_SOURCE_PUBLIC_KEY=1)..."
+          mysql -uroot -h "$$SL" -e "
+            STOP REPLICA;
+            CHANGE REPLICATION SOURCE TO
+              SOURCE_HOST='database',
+              SOURCE_USER='repl',
+              SOURCE_PASSWORD='$${REPL_PASSWORD}',
+              GET_SOURCE_PUBLIC_KEY=1,
+              SOURCE_AUTO_POSITION=1;
+            START REPLICA;"
+
+          echo "Enabling read-only on $$SL..."
+          mysql -uroot -h "$$SL" -e "
+            SET GLOBAL read_only=ON;
+            SET GLOBAL super_read_only=ON;"
+
+          echo "$$SL replication configured."
+        done
+
+        echo 'Replication configured with GTID auto-position.'
+    depends_on:
+      slave1:
+        condition: service_healthy
+      slave2:
+        condition: service_healthy
+    networks: [internal_net]
+    logging: *logging_syslog
+
+  # Python приложение
+  python_app:
+    build: ./python
+    container_name: python_app
+    profiles: ["dynamicweb"]
+    restart: always
+    env_file: [.env]
+    environment:
+      DB_HOST: database
+      DB_NAME: ${DB_NAME}
+      DB_USER: root
+      DB_PASSWORD: ${DB_ROOT_PASSWORD}
+      SECRET_KEY: ${MYSITE_SECRET_KEY}
+      DEBUG: ${DEBUG}
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [internal_net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    logging: *logging_syslog
+
+  # WordPress (PHP-FPM)
+  wordpress:
+    image: wordpress:php8.2-fpm
+    container_name: wordpress
+    profiles: ["dynamicweb"]
+    restart: always
+    env_file: [.env]
+    environment:
+      WORDPRESS_DB_HOST: database:3306
+      WORDPRESS_DB_NAME: ${DB_NAME}
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - wordpress_data:/var/www/html
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [internal_net]
+    healthcheck:
+      test: ["CMD", "php", "-v"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    logging: *logging_syslog
+
+  # Nginx (HTTPS, DMZ)
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    profiles: ["dynamicweb"]
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./ssl:/etc/letsencrypt:ro
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+      python_app:
+        condition: service_started
+      wordpress:
+        condition: service_started
+    networks: [dmz_net, internal_net]
+    logging: *logging_syslog
+
+  # "Фаервол" контейнер (демо) — установка iptables
+  firewall:
+    image: alpine:3.20
+    container_name: firewall
+    profiles: ["dynamicweb"]
+    restart: always
+    cap_add: [NET_ADMIN]
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache iptables >/dev/null
+        iptables -P INPUT DROP
+        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 3306 -j ACCEPT  # Добавлено для MySQL
+        iptables -A INPUT -p tcp --dport 9100 -j ACCEPT
+        iptables -A INPUT -p icmp -j ACCEPT
+        tail -f /dev/null
+    networks: [dmz_net]
+
+  # Node Exporter на DynamicWeb
+  node_exporter_web:
+    image: prom/node-exporter
+    container_name: node_exporter_web
+    profiles: ["dynamicweb","monitoring"]
+    restart: always
+    ports:
+      - "9102:9100"
+    networks: [monitoring_net]
+
+  # ─────────────────────────────
+  # MONITORING (192.168.56.20)
+  # ─────────────────────────────
+
+  rsyslog:
+    image: rsyslog/rsyslog
+    container_name: rsyslog
+    profiles: ["monitoring"]
+    restart: always
+    ports:
+      - "514:514/udp"
+    volumes:
+      - ./rsyslog/rsyslog.conf:/etc/rsyslog.conf:ro
+    command: ["rsyslogd","-n","-f","/etc/rsyslog.conf"]
+    networks: [monitoring_net]
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    profiles: ["monitoring"]
+    restart: always
+    ports: ["9091:9090"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks: [monitoring_net]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging_syslog
+
+  alertmanager:
+    image: prom/alertmanager
+    container_name: alertmanager
+    profiles: ["monitoring"]
+    restart: always
+    ports: ["9094:9093"]
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [monitoring_net]
+    logging: *logging_syslog
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    profiles: ["monitoring"]
+    restart: always
+    ports: ["3001:3000"]
+    env_file: [.env]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning
+    networks: [monitoring_net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging_syslog
+
+  # Node Exporter на Monitoring
+  node_exporter_mon:
+    image: prom/node-exporter
+    container_name: node_exporter_mon
+    profiles: ["monitoring"]
+    restart: always
+    ports:
+      - "9103:9100"
+    networks: [monitoring_net]
+
+  # cAdvisor для мониторинга Docker контейнеров
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    profiles: ["monitoring"]
+    restart: always
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring_net]
+    logging: *logging_syslog
+
+  # MySQL Exporter для мониторинга баз данных
+  mysqld_exporter:
+    image: prom/mysqld-exporter:v0.14.0
+    container_name: mysqld_exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "9105:9104"
+    environment:
+      DATA_SOURCE_NAME: "root:StrongPass123@tcp(192.168.56.10:3306)/"  # Прямой IP
+    command:
+      - "--collect.global_status"
+      - "--collect.global_variables"
+      - "--collect.slave_status"
+      - "--collect.info_schema.processlist"
+      - "--collect.engine_innodb_status"
+    networks: [monitoring_net]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9104/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: *logging_syslog
+
+  # Blackbox Exporter для проверки доступности сервисов
+  blackbox-exporter:
+    image: prom/blackbox-exporter
+    container_name: blackbox_exporter
+    profiles: ["monitoring"]
+    restart: always
+    ports:
+      - "9116:9115"
+    volumes:
+      - ./monitoring/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks: [monitoring_net]
+    logging: *logging_syslog
+
+# СЕТИ
+networks:
+  dmz_net:
+    driver: bridge
+  
+  monitoring_net:
+    driver: bridge
+  
+  internal_net:
+    driver: bridge
+
+volumes:
+  mysql_master_data:
+  mysql_slave1_data:
+  mysql_slave2_data:
+  wordpress_data:
+  grafana_data:

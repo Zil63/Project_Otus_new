@@ -1,0 +1,140 @@
+---
+# Emergency Recovery Playbook for Otus Project
+# Usage: ansible-playbook emergency-recovery.yml -i hosts -l <hosts> --tags <service>
+
+- name: Emergency Service Recovery
+  hosts: all
+  become: true
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  tasks:
+    - name: Check Docker service status
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+      tags: docker
+
+    - name: Verify project directory exists
+      ansible.builtin.stat:
+        path: "{{ project_dir }}"
+      register: project_dir_stat
+      failed_when: not project_dir_stat.stat.exists
+      tags: always
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+      listen: "restart docker"
+
+- name: Database Layer Recovery
+  hosts: web
+  become: true
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  tasks:
+    - name: Restart MySQL master and slaves
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up -d database slave1 slave2
+      args:
+        chdir: "{{ project_dir }}"
+      tags: mysql
+
+    - name: Wait for MySQL master to be healthy
+      ansible.builtin.shell: |
+        timeout 120 bash -c 'until docker inspect -f "{{"{{.State.Health.Status}}"}}" database | grep -q "healthy"; do sleep 2; done'
+      args:
+        chdir: "{{ project_dir }}"
+      tags: mysql
+
+    - name: Reinitialize replication if needed
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up --abort-on-container-exit mysql_init_repl
+      args:
+        chdir: "{{ project_dir }}"
+      tags: mysql_repl
+
+- name: Application Layer Recovery
+  hosts: web
+  become: true
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  tasks:
+    - name: Restart application services
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up -d python_app wordpress nginx firewall
+      args:
+        chdir: "{{ project_dir }}"
+      tags: apps
+
+    - name: Verify application containers are running
+      ansible.builtin.shell: |
+        for service in python_app wordpress nginx firewall; do
+          if ! docker ps --format "{{"{{.Names}}"}}" | grep -q "^${service}$"; then
+            echo "Service $service is not running"
+            exit 1
+          fi
+        done
+        echo "All application services are running"
+      args:
+        chdir: "{{ project_dir }}"
+      tags: apps
+
+- name: Monitoring Layer Recovery
+  hosts: mon
+  become: true
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  tasks:
+    - name: Restart monitoring stack
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile monitoring up -d
+      args:
+        chdir: "{{ project_dir }}"
+      tags: monitoring
+
+    - name: Verify monitoring services
+      ansible.builtin.shell: |
+        services=("prometheus" "alertmanager" "grafana" "rsyslog" "cadvisor" "mysqld_exporter" "blackbox_exporter")
+        for service in "${services[@]}"; do
+          if ! docker ps --format "{{"{{.Names}}"}}" | grep -q "^${service}$"; then
+            echo "Monitoring service $service is not running"
+            exit 1
+          fi
+        done
+        echo "All monitoring services are running"
+      args:
+        chdir: "{{ project_dir }}"
+      tags: monitoring
+
+- name: Full Stack Recovery
+  hosts: all
+  become: true
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  tasks:
+    - name: Full stack restart
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb --profile monitoring up -d --force-recreate
+      args:
+        chdir: "{{ project_dir }}"
+      tags: full_recovery
+
+    - name: Verify all services
+      ansible.builtin.shell: |
+        docker ps --format "table {{"{{.Names}}\t{{.Status}}\t{{.Ports}}"}}"
+      args:
+        chdir: "{{ project_dir }}"
+      tags: full_recovery

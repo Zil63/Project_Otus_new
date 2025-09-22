@@ -1,0 +1,102 @@
+groups:
+  - name: infrastructure
+    rules:
+      # Мониторинг контейнеров
+      - alert: ContainerDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Контейнер недоступен (instance {{ $labels.instance }})"
+          description: "Контейнер {{ $labels.job }} на {{ $labels.instance }} не отвечает более 1 минуты"
+
+      # Мониторинг использования CPU
+      - alert: HighCpuUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая загрузка CPU (instance {{ $labels.instance }})"
+          description: "CPU нагрузка > 80% в течение 5 минут"
+
+      # Мониторинг памяти
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое использование памяти (instance {{ $labels.instance }})"
+          description: "Использование памяти > 85% в течение 5 минут"
+
+      # Мониторинг диска
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} * 100) / node_filesystem_size_bytes{mountpoint="/"} < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Мало свободного места на диске (instance {{ $labels.instance }})"
+          description: "Свободно менее 10% на корневом разделе"
+
+      # Мониторинг MySQL
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL недоступен (instance {{ $labels.instance }})"
+          description: "MySQL сервер не отвечает более 2 минут"
+
+      # Репликация MySQL
+      - alert: MySQLReplicationLag
+        expr: mysql_slave_status_seconds_behind_master > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Лаг репликации MySQL (instance {{ $labels.instance }})"
+          description: "Репликация отстает более чем на 30 секунд"
+
+      # Мониторинг Nginx
+      - alert: NginxDown
+        expr: nginx_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nginx недоступен"
+          description: "Nginx не отвечает более 2 минут"
+
+      # 5xx ошибки в Nginx
+      - alert: High5xxErrorRate
+        expr: rate(nginx_http_requests_total{status=~"5.."}[5m]) / rate(nginx_http_requests_total[5m]) * 100 > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокий уровень 5xx ошибок ({{ $labels.host }})"
+          description: "Более 5% запросов возвращают 5xx ошибки"
+
+      # Мониторинг репликации MySQL
+      - alert: MySQLReplicationNotRunning
+        expr: mysql_slave_status_slave_io_running == 0 or mysql_slave_status_slave_sql_running == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Репликация MySQL остановлена (instance {{ $labels.instance }})"
+          description: "Репликация MySQL не работает на instance {{ $labels.instance }}"
+
+      # Мониторинг Docker контейнеров
+      - alert: DockerContainerRestarted
+        expr: increase(container_restarts_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Контейнер перезапущен ({{ $labels.container_name }})"
+          description: "Контейнер {{ $labels.container_name }} был перезапущен в течение последних 5 минут"

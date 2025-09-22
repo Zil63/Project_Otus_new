@@ -1,0 +1,29 @@
+---
+- name: Создать директории для WordPress
+  file:
+    path: "/opt/wordpress"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Шаблонизировать docker-compose для WordPress
+  template:
+    src: docker-compose.wordpress.yml.j2
+    dest: /opt/wordpress/docker-compose.yml
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Копировать wp-config.php
+  template:
+    src: wp-config.php.j2
+    dest: /opt/wordpress/wp-config.php
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Запустить WordPress контейнер
+  community.docker.docker_compose:
+    project_src: /opt/wordpress
+    state: present

@@ -1,0 +1,377 @@
+---
+# ===================================================================
+# 0) Локальная подготовка: очистка конфликтующих SSH host keys
+# ===================================================================
+- name: Local prep (cleanup known_hosts)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Remove old SSH host keys for project VMs
+      ansible.builtin.shell: ssh-keygen -R {{ item }} || true
+      loop:
+        - 192.168.56.10
+        - 192.168.56.20
+      changed_when: false
+
+# ===================================================================
+# 1) Web (DynamicWeb): Docker → compose validate → DB & repl init → apps
+# ===================================================================
+- name: Setup Web (MySQL8 → Replicas → App → Nginx/Firewall/Exporter)
+  hosts: web
+  become: true
+  gather_facts: true
+
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+    db_root_password: "StrongPass123"
+    repl_password: "replicaPass123"
+    mysql_health_retries: 60
+    mysql_health_delay: 5
+
+  pre_tasks:
+    - name: Purge old Docker repos/keys
+      ansible.builtin.shell: |
+        sed -i '/download\.docker\.com/d' /etc/apt/sources.list || true
+        rm -f /etc/apt/sources.list.d/*docker* || true
+        rm -f /etc/apt/sources.list.d/*.sources || true
+        rm -f /etc/apt/keyrings/docker.* || true
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+      args: { warn: false }
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg]
+        state: present
+        update_cache: true
+
+    - name: Ensure /etc/apt/keyrings exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG (armored)
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /tmp/docker.gpg.asc
+        mode: "0644"
+
+    - name: Dearmor Docker key
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg.asc
+      args: { creates: /etc/apt/keyrings/docker.gpg }
+
+    - name: Map architecture
+      ansible.builtin.set_fact:
+        apt_arch: "{{ 'amd64' if ansible_architecture in ['x86_64','amd64'] else ('arm64' if ansible_architecture in ['aarch64','arm64'] else ansible_architecture) }}"
+
+    - name: Add Docker source (deb822)
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: {{ ansible_distribution_release }}
+          Components: stable
+          Architectures: {{ apt_arch }}
+          Signed-By: /etc/apt/keyrings/docker.gpg
+
+    - name: Install Docker & Compose
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+        update_cache: true
+
+    - name: Ensure docker service is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add vagrant to docker group (for interactive usage)
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+
+  tasks:
+    - name: Stop all services and clean up networks
+      ansible.builtin.shell: |
+        cd {{ project_dir }} && \
+        docker compose -f {{ compose_file }} --profile dynamicweb down --remove-orphans 2>/dev/null || true && \
+        docker container prune -f 2>/dev/null || true && \
+        docker network rm project_internal_net project_dmz_net 2>/dev/null || true && \
+        sleep 2 && \
+        docker network prune -f 2>/dev/null || true
+      ignore_errors: yes
+
+    - name: Create internal network
+      ansible.builtin.shell: |
+        docker network create --driver=bridge --subnet=172.18.0.0/24 --gateway=172.18.0.1 --internal \
+          --label com.docker.compose.network=internal_net \
+          --label com.docker.compose.project=project \
+          project_internal_net
+      args: { chdir: "{{ project_dir }}" }
+      ignore_errors: yes
+
+    - name: Create dmz network
+      ansible.builtin.shell: |
+        docker network create --driver=bridge --subnet=192.168.100.0/24 \
+          --label com.docker.compose.network=dmz_net \
+          --label com.docker.compose.project=project \
+          project_dmz_net
+      args: { chdir: "{{ project_dir }}" }
+      ignore_errors: yes
+
+    - name: Ensure project dir exists (from Vagrant synced folder)
+      ansible.builtin.file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0755"
+
+    - name: Validate compose file presence
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/{{ compose_file }}"
+      register: compose_stat
+
+    - name: Abort if compose file missing
+      ansible.builtin.fail:
+        msg: "Compose '{{ compose_file }}' not found in {{ project_dir }}. Проверь Vagrant synced_folder."
+      when: not compose_stat.stat.exists
+
+    - name: docker compose config (lint)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} config
+      args: { chdir: "{{ project_dir }}" }
+      changed_when: false
+
+    - name: Up database + replicas (detached)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up -d database slave1 slave2
+      args: { chdir: "{{ project_dir }}" }
+
+    - name: Wait for master healthy
+      ansible.builtin.shell: docker inspect -f '{{"{{.State.Health.Status}}"}}' database
+      args: { chdir: "{{ project_dir }}" }
+      register: master_health
+      retries: "{{ mysql_health_retries }}"
+      delay: "{{ mysql_health_delay }}"
+      until: master_health.stdout.strip() == "healthy"
+
+    - name: Wait for replicas healthy
+      ansible.builtin.shell: |
+        s1=$(docker inspect -f '{{"{{.State.Health.Status}}"}}' slave1); \
+        s2=$(docker inspect -f '{{"{{.State.Health.Status}}"}}' slave2); \
+        echo "$s1 $s2"
+      args: { chdir: "{{ project_dir }}" }
+      register: replicas_health
+      retries: 30
+      delay: 5
+      until: "'healthy healthy' in replicas_health.stdout"
+
+    - name: Initialize replication (mysql_init_repl)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up --abort-on-container-exit mysql_init_repl
+      args: { chdir: "{{ project_dir }}" }
+
+    - name: Collect SHOW REPLICA STATUS from replicas
+      ansible.builtin.shell: >
+        docker exec {{ item }} bash -lc
+        "mysql -uroot -p'{{ db_root_password }}' -e \"SHOW REPLICA STATUS\\G\""
+      args: { chdir: "{{ project_dir }}" }
+      loop: [ "slave1", "slave2" ]
+      register: repl_status
+      changed_when: false
+
+    - name: Start app stack (python_app, certgen, nginx, firewall, node_exporter_web, wordpress)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile dynamicweb up -d python_app certgen nginx firewall node_exporter_web wordpress
+      args: { chdir: "{{ project_dir }}" }
+
+    - name: Verify web containers are running
+      vars:
+        web_services: [ "nginx", "python_app", "firewall", "node_exporter_web", "wordpress" ]
+      ansible.builtin.shell: |
+        for s in {{ web_services | join(' ') }}; do
+          st=$(docker inspect -f '{{"{{.State.Status}}"}}' "$s" 2>/dev/null || echo "missing");
+          echo "$s $st";
+          test "$st" = "running" || exit 1;
+        done
+      args: { chdir: "{{ project_dir }}" }
+
+# ===================================================================
+# 2) Monitoring — rsyslog, Prometheus, Alertmanager, Grafana
+# ===================================================================
+- name: Setup Monitoring stack
+  hosts: mon
+  become: true
+  gather_facts: true
+
+  vars:
+    project_dir: "/home/vagrant/project"
+    compose_file: "docker-compose.yml"
+
+  pre_tasks:
+    - name: Purge old Docker repos/keys
+      ansible.builtin.shell: |
+        sed -i '/download\.docker\.com/d' /etc/apt/sources.list || true
+        rm -f /etc/apt/sources.list.d/*docker* || true
+        rm -f /etc/apt/sources.list.d/*.sources || true
+        rm -f /etc/apt/keyrings/docker.* || true
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+      args: { warn: false }
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg]
+        state: present
+        update_cache: true
+
+    - name: Ensure /etc/apt/keyrings exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG (armored)
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /tmp/docker.gpg.asc
+        mode: "0644"
+
+    - name: Dearmor Docker key
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg.asc
+      args: { creates: /etc/apt/keyrings/docker.gpg }
+
+    - name: Map architecture
+      ansible.builtin.set_fact:
+        apt_arch: "{{ 'amd64' if ansible_architecture in ['x86_64','amd64'] else ('arm64' if ansible_architecture in ['aarch64','arm64'] else ansible_architecture) }}"
+
+    - name: Add Docker source (deb822)
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: {{ ansible_distribution_release }}
+          Components: stable
+          Architectures: {{ apt_arch }}
+          Signed-By: /etc/apt/keyrings/docker.gpg
+
+    - name: Install Docker & Compose
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+        update_cache: true
+
+    - name: Ensure docker service is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add vagrant to docker group (for interactive usage)
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+
+  tasks:
+    - name: Stop all monitoring services and clean up
+      ansible.builtin.shell: |
+        cd {{ project_dir }} && \
+        docker compose -f {{ compose_file }} --profile monitoring down --remove-orphans 2>/dev/null || true && \
+        docker container prune -f 2>/dev/null || true && \
+        docker network rm project_monitoring_net 2>/dev/null || true && \
+        sleep 2 && \
+        docker network prune -f 2>/dev/null || true
+      ignore_errors: yes
+
+    - name: Create monitoring network
+      ansible.builtin.shell: |
+        docker network create --driver=bridge --subnet=192.168.101.0/24 \
+          --label com.docker.compose.network=monitoring_net \
+          --label com.docker.compose.project=project \
+          project_monitoring_net
+      args: { chdir: "{{ project_dir }}" }
+      ignore_errors: yes
+
+    - name: Ensure project dir exists (from Vagrant synced folder)
+      ansible.builtin.file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0755"
+
+    - name: Validate compose file presence
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/{{ compose_file }}"
+      register: compose_stat
+
+    - name: Abort if compose file missing
+      ansible.builtin.fail:
+        msg: "Compose '{{ compose_file }}' not found in {{ project_dir }}. Проверь Vagrant synced_folder."
+      when: not compose_stat.stat.exists
+
+    - name: docker compose config (lint)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} config
+      args: { chdir: "{{ project_dir }}" }
+      changed_when: false
+
+    - name: Ensure monitoring config directory exists
+      ansible.builtin.file:
+        path: "{{ project_dir }}/monitoring"
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0755"
+
+    - name: Copy monitoring configuration files
+      ansible.builtin.copy:
+        src: "project/monitoring/{{ item }}"
+        dest: "{{ project_dir }}/monitoring/"
+        owner: vagrant
+        group: vagrant
+        mode: "0644"
+      loop:
+        - "prometheus.yml"
+        - "alertmanager.yml"
+        - "alerts.yml"
+        - "blackbox.yml"
+
+    - name: Ensure required Monitoring vars in .env
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/.env"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+        create: yes
+        owner: vagrant
+        group: vagrant
+        mode: "0644"
+      loop:
+        - { key: "RSYSLOG_SERVER", value: "{{ ansible_host }}" }
+        - { key: "GRAFANA_ADMIN_USER", value: "admin" }
+        - { key: "GRAFANA_ADMIN_PASSWORD", value: "admin123" }
+
+    - name: Bring up monitoring stack (without dependencies)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile monitoring up -d --no-deps
+      args: { chdir: "{{ project_dir }}" }
+
+    - name: Start mysqld_exporter separately (with retries)
+      ansible.builtin.command:
+        cmd: docker compose -f {{ compose_file }} --profile monitoring up -d mysqld_exporter
+      args: { chdir: "{{ project_dir }}" }
+      retries: 3
+      delay: 10

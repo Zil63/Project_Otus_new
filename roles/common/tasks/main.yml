@@ -1,0 +1,28 @@
+---
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+  when: ansible_os_family in ['Debian', 'RedHat']
+  ignore_errors: yes
+
+- include_tasks: packages.yml
+- include_tasks: security.yml
+  when: ansible_distribution != "Container Linux by CoreOS"
+
+- name: Set timezone
+  ansible.builtin.timezone:
+    name: "{{ common_timezone }}"
+  tags: timezone
+
+- name: Configure NTP
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+  when: ansible_os_family == 'Debian'
+  tags: ntp
+
+- name: Ensure /etc/hosts contains localhost
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "127.0.0.1 localhost {{ ansible_hostname }}"
+    regexp: "^127\\.0\\.0\\.1"
+    state: present

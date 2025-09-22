@@ -1,0 +1,6 @@
+node_container_name: node
+node_image: node:16.13.2-alpine3.15
+node_workdir: /opt/server
+node_volume: "{{ playbook_dir }}/node:/opt/server"
+node_command: node test.js
+node_network: app-network

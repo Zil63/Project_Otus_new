@@ -1,0 +1,11 @@
+# Telegram alerting configuration
+telegram_bot_token: "8497809072:AAFfDHeHdvFxG2xFrdX-GOQpQR5O-__ARvU"
+telegram_chat_id: 315679511  # ✅ В КАВЫЧКАХ!
+
+# Project directories
+project_dir: "/home/vagrant/project"
+compose_file: "docker-compose.yml"
+
+# Monitoring settings
+mysql_health_retries: 60
+mysql_health_delay: 5

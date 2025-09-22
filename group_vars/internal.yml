@@ -1,0 +1,5 @@
+db_credentials:
+  root_password: "{{ vault_db_password }}"  # Шифруется ansible-vault
+monitoring_services:
+  - prometheus
+  - grafana

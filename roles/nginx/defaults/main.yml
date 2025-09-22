@@ -1,0 +1,8 @@
+nginx_image_name: project_nginx
+nginx_image_tag: latest
+nginx_container_name: project_nginx
+nginx_build_context: "{{ playbook_dir }}/nginx-conf"
+nginx_conf_dir: "{{ playbook_dir }}/nginx-conf"
+nginx_ssl_params: "{{ playbook_dir }}/nginx-conf/ssl-params.conf"
+nginx_server_name: localhost
+syslog_host: 192.168.56.20

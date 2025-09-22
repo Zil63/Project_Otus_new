@@ -1,0 +1,5 @@
+mysql_repl_group_name: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+mysql_master_container: "database"
+mysql_node2_container: "node2"
+mysql_node3_container: "node3"
+mysql_repl_port: "6606"

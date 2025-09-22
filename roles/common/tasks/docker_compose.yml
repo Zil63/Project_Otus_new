@@ -1,0 +1,13 @@
+# roles/common/tasks/docker_compose.yml
+
+- name: Install Docker Compose plugin (v2)
+  ansible.builtin.apt:
+    name: docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Create compatibility symlink for docker-compose (optional)
+  ansible.builtin.file:
+    src: /usr/libexec/docker/cli-plugins/docker-compose
+    dest: /usr/local/bin/docker-compose
+    state: link

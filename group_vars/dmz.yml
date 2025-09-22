@@ -1,0 +1,14 @@
+# group_vars/dmz.yml
+dmz_services:
+  - nginx
+  - certbot
+firewall_allowed_ports:
+  - "443"
+  - "22"
+
+# group_vars/internal.yml
+db_credentials:
+  root_password: "{{ vault_db_password }}"  # Шифруется ansible-vault
+monitoring_services:
+  - prometheus
+  - grafana

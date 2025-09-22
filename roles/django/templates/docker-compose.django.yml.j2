@@ -1,0 +1,28 @@
+version: '3.3'
+
+services:
+  {{ django_container_name }}:
+    image: {{ django_image }}
+    container_name: {{ django_container_name }}
+    working_dir: /app
+    volumes:
+      - ./{{ django_project_name }}:/app
+      - ./{{ django_requirements }}:/app/{{ django_requirements }}
+    environment:
+      {% for key, value in django_env.items() %}
+      - {{ key }}={{ value }}
+      {% endfor %}
+    command: >
+      sh -c "
+        pip install -r /app/{{ django_requirements }} &&
+        python manage.py migrate &&
+        gunicorn {{ django_project_name }}.wsgi:application --bind 0.0.0.0:{{ django_port }}
+      "
+    ports:
+      - "{{ django_port }}:{{ django_port }}"
+    networks:
+      - {{ django_docker_network }}
+
+networks:
+  {{ django_docker_network }}:
+    external: true

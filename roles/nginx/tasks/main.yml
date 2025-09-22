@@ -1,0 +1,24 @@
+---
+- name: Ensure nginx image is built
+  docker_image:
+    build:
+      path: "{{ nginx_build_context }}"
+    name: "{{ nginx_image_name }}"
+    tag: "{{ nginx_image_tag }}"
+  register: nginx_image
+
+- name: Create nginx container
+  docker_container:
+    name: "{{ nginx_container_name }}"
+    image: "{{ nginx_image_name }}:{{ nginx_image_tag }}"
+    state: started
+    restart_policy: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "{{ nginx_conf_dir }}:/etc/nginx/conf.d"
+      - "{{ nginx_ssl_params }}:/etc/nginx/ssl-params.conf"
+    networks:
+      - name: app-network
+  when: nginx_image.changed

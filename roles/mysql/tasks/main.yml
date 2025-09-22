@@ -1,0 +1,6 @@
+---
+- name: Include setup
+  include_tasks: setup.yml
+
+- name: Include replication setup
+  include_tasks: replication.yml

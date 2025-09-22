@@ -1,0 +1,25 @@
+---
+- name: Bootstrap MySQL Group Replication on master
+  shell: |
+    docker exec database mysql -uroot -p{{ db_root_password }} -e "\
+      SET SQL_LOG_BIN=0; \
+      CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD='{{ repl_password }}' FOR CHANNEL 'group_replication_recovery'; \
+      START GROUP_REPLICATION; \
+      SELECT * FROM performance_schema.replication_group_members;"
+  when: inventory_hostname == 'Dynamicweb'
+
+- name: Start Group Replication on node2
+  shell: |
+    docker exec node2 mysql -uroot -p{{ db_root_password }} -e "\
+      SET SQL_LOG_BIN=0; \
+      CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD='{{ repl_password }}' FOR CHANNEL 'group_replication_recovery'; \
+      START GROUP_REPLICATION;"
+  when: inventory_hostname == 'Dynamicweb'
+
+- name: Start Group Replication on node3
+  shell: |
+    docker exec node3 mysql -uroot -p{{ db_root_password }} -e "\
+      SET SQL_LOG_BIN=0; \
+      CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD='{{ repl_password }}' FOR CHANNEL 'group_replication_recovery'; \
+      START GROUP_REPLICATION;"
+  when: inventory_hostname == 'Dynamicweb'

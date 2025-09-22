@@ -1,0 +1,20 @@
+---
+- name: Create .env file
+  copy:
+    dest: "{{ project_root }}/.env"
+    content: |
+      DB_NAME={{ db_name }}
+      DB_USER={{ db_user }}
+      DB_ROOT_PASSWORD={{ db_root_password }}
+
+- name: Copy docker-compose.mysql.yml
+  template:
+    src: docker-compose.mysql.yml.j2
+    dest: "{{ project_root }}/docker-compose.mysql.yml"
+
+- name: Start MySQL containers
+  community.docker.docker_compose:
+    project_src: "{{ project_root }}"
+    files:
+      - docker-compose.mysql.yml
+    state: present

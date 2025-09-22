@@ -1,0 +1,3 @@
+[mysqld]
+relay_log=relay-bin
+# Никакого read_only / super_read_only здесь!

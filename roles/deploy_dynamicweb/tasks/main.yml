@@ -1,0 +1,72 @@
+---
+- name: Скопировать docker-compose.yml
+  copy:
+    src: files/docker-compose.yml
+    dest: /home/vagrant/project/docker-compose.yml
+    owner: vagrant
+    group: vagrant
+    mode: '0644'
+
+- name: Создать .env
+  copy:
+    dest: /home/vagrant/project/.env
+    content: |
+      DB_ROOT_PASSWORD=rootpass123
+      DB_NAME=wordpress
+      MYSITE_SECRET_KEY=changeme
+      DEBUG=0
+      REPL_PASSWORD=replicaPass123
+    owner: vagrant
+    group: vagrant
+    mode: '0600'
+
+- name: Запустить профиль dynamicweb
+  shell: docker compose --profile dynamicweb up -d
+  args:
+    chdir: /home/vagrant/project
+
+- name: Ждать пока MySQL master будет healthy
+  shell: docker inspect --format='{{.State.Health.Status}}' database
+  register: master_health
+  until: master_health.stdout == "healthy"
+  retries: 30
+  delay: 5
+
+- name: Ждать пока MySQL slave1 будет healthy
+  shell: docker inspect --format='{{.State.Health.Status}}' slave1
+  register: slave1_health
+  until: slave1_health.stdout == "healthy"
+  retries: 30
+  delay: 5
+
+- name: Ждать пока MySQL slave2 будет healthy
+  shell: docker inspect --format='{{.State.Health.Status}}' slave2
+  register: slave2_health
+  until: slave2_health.stdout == "healthy"
+  retries: 30
+  delay: 5
+
+- name: Запустить инициализацию репликации
+  shell: docker compose run --rm mysql_init_repl
+  args:
+    chdir: /home/vagrant/project
+
+- name: Проверить репликацию на slave1
+  shell: docker exec slave1 sh -lc 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW REPLICA STATUS\G" | egrep "Running|Seconds_Behind"'
+  args:
+    chdir: /home/vagrant/project
+  register: repl_slave1
+
+- name: Вывести статус репликации slave1
+  debug:
+    var: repl_slave1.stdout_lines
+
+- name: Проверить репликацию на slave2
+  shell: docker exec slave2 sh -lc 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW REPLICA STATUS\G" | egrep "Running|Seconds_Behind"'
+  args:
+    chdir: /home/vagrant/project
+  register: repl_slave2
+
+- name: Вывести статус репликации slave2
+  debug:
+    var: repl_slave2.stdout_lines
